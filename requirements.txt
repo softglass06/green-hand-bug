@@ -1,0 +1,8 @@
+# 这个文件列出了程序需要安装的第三方库。
+# 在命令行里运行下面这一句，就能一次性全部安装：
+#     pip install -r requirements.txt
+
+requests          # 用来向网站发送请求、拿回网页内容
+beautifulsoup4    # 用来解析网页、从网页里查找内容
+lxml              # BeautifulSoup 的解析引擎，速度更快
+openpyxl          # 用来读写 Excel 文件（.xlsx）
