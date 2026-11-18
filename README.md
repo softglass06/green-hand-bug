@@ -82,11 +82,13 @@
 
 ```
 python -m venv build_venv
-build_venv\Scripts\python.exe -m pip install requests beautifulsoup4 lxml openpyxl pyinstaller
-build_venv\Scripts\python.exe -m PyInstaller --onefile --windowed --noconfirm --clean --name SpiderTool gui.py
+build_venv\Scripts\python.exe -m pip install requests beautifulsoup4 lxml openpyxl selenium pyinstaller
+build_venv\Scripts\python.exe -m PyInstaller --noconfirm --clean SpiderTool.spec
 ```
 
-打包完成后，新的 exe 在 `dist\SpiderTool.exe`（可自己改名成中文）。
+打包完成后，把 `dist\SpiderTool.exe` 改名为中文（比如 `小白爬虫.exe`）。
+
+> 说明：`SpiderTool.spec` 里已经配置好把 selenium（动态渲染用）一起打进去，所以直接用它打包即可，不要用旧的 `--name SpiderTool gui.py` 命令（那样会漏掉 selenium）。
 
 ## 常见问题
 
