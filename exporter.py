@@ -131,6 +131,7 @@ def export_to_excel(data, output_path):
         ("网址", data.get("网址", "")),
         ("标题", data.get("标题", "")),
         ("网页类型", data.get("网页类型", "")),
+        ("爬取页数", data.get("爬取页数", "")),
         ("描述", data.get("描述", "")),
     ]
     for row_index, (key, value) in enumerate(info_rows, start=1):  # 从第 1 行开始写

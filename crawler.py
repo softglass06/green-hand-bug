@@ -23,6 +23,9 @@ from collections import Counter
 # urljoin 是 Python 自带的工具，用来把"半截网址"补全成"完整网址"。
 from urllib.parse import urljoin
 
+# time 是 Python 自带的工具，用来在请求之间"歇一下"（礼貌爬取、失败重试）。
+import time
+
 # requests 是第三方库，负责"向网站发请求、拿回网页内容"。
 # 第三方库 = 别人写好的、需要先用 pip 安装才能用的库。
 import requests
@@ -49,34 +52,75 @@ def clean_text(text):
 
 # ---------- 第三部分：抓取网页 ----------
 
-def fetch_html(url, timeout=15):
+_SESSION = None                                 # 全局会话，整个程序共用一个（保存 Cookie 等）
+
+
+def _get_session():
+    """获取（或创建）一个全局的 requests 会话。
+
+    用"会话"的好处：
+    1. 能自动保存网站给的 Cookie（登录态、翻页时要带的东西等）。
+    2. 能统一设置一套"像真人浏览器"的请求头，降低被反爬拦截的概率。
+    """
+    global _SESSION
+    if _SESSION is None:
+        _SESSION = requests.Session()
+        _SESSION.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        })
+    return _SESSION
+
+
+def fetch_html(url, timeout=15, retries=2, delay=1.0):
     """根据网址，向网站请求网页内容，并返回网页的 HTML 文字。
+
+    做了两件"对抗反爬"的事：
+    1. 用一套像真人浏览器的请求头 + 会保存 Cookie 的会话去访问；
+    2. 遇到网络抖动 / 服务器 5xx / 429(太频繁) 会自动重试几次，并逐次加长等待。
 
     参数：
         url：要抓取的网址。
         timeout：最长等待多少秒，超过就报错（默认 15 秒）。
+        retries：失败后最多重试几次（默认 2 次）。
+        delay：重试前等待的秒数（会随重试次数递增）。
 
     返回：
         网页的 HTML 文字（字符串，已处理好中文乱码）。
     """
-    # 伪装成"浏览器"的身份去访问。
-    # 有些网站会拒绝"爬虫程序"的访问，带上浏览器标识（User-Agent）能降低被拒绝的概率。
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
+    session = _get_session()                     # 用同一个会话，自动带 Cookie
+    last_error = None
 
-    # 用 GET 方式请求网页（GET 就是"去拿一个网页"最常用的方式）。
-    response = requests.get(url, headers=headers, timeout=timeout)
+    for attempt in range(retries + 1):           # 一共尝试 retries + 1 次
+        try:
+            response = session.get(url, timeout=timeout)
+            response.raise_for_status()          # 非 2xx（成功）都抛 HTTPError
+            return _decode_html(response)
+        except requests.exceptions.RequestException as error:
+            last_error = error
+            # 判断这次错误值不值得重试：
+            # 网络断连 / 超时 / 服务器 5xx / 429(请求太频繁) → 值得重试
+            retryable = isinstance(
+                error,
+                (requests.exceptions.ConnectionError, requests.exceptions.Timeout),
+            )
+            resp = getattr(error, "response", None)
+            if resp is not None and (resp.status_code >= 500 or resp.status_code == 429):
+                retryable = True
+            if not retryable:                    # 例如 404 找不到页面，重试也没用，直接抛
+                raise
+            if attempt < retries:                # 还没用尽重试次数，歇一下再试
+                time.sleep(delay * (attempt + 1))  # 越往后等越久，更"礼貌"
 
-    # 如果网站返回了错误状态码（例如 404 找不到页面），这里会直接抛出异常。
-    response.raise_for_status()
-
-    # 把网页的原始字节，按正确的编码转成文字（解决中文乱码问题）。
-    return _decode_html(response)
+    raise last_error                             # 全部失败，抛出最后一次的错误
 
 
 def _decode_html(response):
@@ -514,44 +558,84 @@ def _find_contexts(text, keyword, window=30):
     return snippets
 
 
+# ---------- 第八点六部分：翻页 ----------
+
+def find_next_page_url(soup, current_url):
+    """在网页里找出"下一页"的链接，用于多页爬取。
+
+    优先找 HTML 标准里的 rel="next" 链接；
+    找不到就找文字像"下一页 / 下页 / next / > / ›"的链接。
+
+    参数：
+        soup：已经解析好的网页对象。
+        current_url：当前网页的网址（用来补全半截链接）。
+
+    返回：
+        下一页的完整网址；找不到返回 None。
+    """
+    # 方法1：HTML 标准的分页标记 rel="next"
+    next_a = soup.find("a", rel="next")
+    if next_a and next_a.get("href"):
+        return urljoin(current_url, next_a["href"])
+
+    # 方法2：找文字像"下一页"的链接
+    for a in soup.find_all("a"):
+        text = clean_text(a.get_text())
+        if text and any(k in text for k in ("下一页", "下页", "next", "Next", "›", ">")):
+            href = a.get("href")
+            if href:
+                return urljoin(current_url, href)
+
+    return None
+
+
 # ---------- 第九部分：总入口 ----------
 
-def crawl(url, keyword=None):
-    """总入口：抓取并分析一个网页，把结果打包成一个字典返回。
+def crawl(url, keyword=None, pages=1, use_browser=False):
+    """总入口：抓取并分析网页（支持翻页和动态渲染），把结果打包成一个字典返回。
 
     参数：
         url：要爬取的网址。
         keyword：可选，要检索的关键词。传了它，结果里会多一个"关键词检索"字段。
+        pages：最多爬几页（>=1）。翻页靠网页里的"下一页"链接，找不到会提前停止。
+        use_browser：True 时用浏览器（Selenium）渲染动态内容，拿到 JS 加载后的网页。
 
     返回：
         一个字典，包含标题、网页类型、描述、表格、列表、正文、图片等所有结果。
     """
-    html = fetch_html(url)                        # 1. 抓取网页，拿到 HTML 文字
-
-    # 2. 把 HTML 解析成方便查找的对象。
-    #    优先用 lxml 解析器（速度快）；如果没装 lxml，就退回 Python 自带的 html.parser（慢一点但不用额外安装）。
     try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
+        pages = int(pages)
+    except (TypeError, ValueError):
+        pages = 1
+    pages = max(1, pages)                        # 至少爬 1 页
 
-    # 3. 把脚本、样式等"非正文"的内容删掉，避免它们混进正文/检索结果里。
-    for tag in soup(["script", "style", "noscript", "iframe"]):
-        tag.decompose()
+    page_list = []                               # 每页的分析结果先存这里
+    current_url = url
+    visited = set()                              # 防止翻页翻出环，重复爬同一页
 
-    # 4. 调用上面各个函数，把分析结果打包成一个字典。
-    data = {
-        "网址": url,                              # 记录网址
-        "标题": extract_title(soup),              # 提取标题
-        "网页类型": detect_page_type(soup),       # 识别网页类型
-        "描述": extract_meta_description(soup),   # 提取描述
-        "表格": extract_tables(soup),             # 提取所有表格
-        "列表": extract_list_items(soup),         # 提取列表
-        "正文": extract_paragraphs(soup),         # 提取正文段落
-        "图片": extract_images(soup, url),        # 提取图片链接
-    }
+    for page_index in range(pages):
+        if not current_url or current_url in visited:
+            break                                # 没有下一页 / 已经在环里，停止
+        visited.add(current_url)
 
-    # 5. 如果用户传了关键词，就做关键词检索，并把结果塞进 data 里。
+        try:
+            html = _fetch_page_html(current_url, use_browser)  # 抓这一页
+            soup = _parse_soup(html)             # 解析这一页
+        except Exception:
+            break                                # 某页抓取失败，就不再往下翻
+
+        page_list.append(_extract_page(soup, current_url))
+
+        next_url = find_next_page_url(soup, current_url)  # 找"下一页"
+        if next_url is None:
+            break                                # 没有下一页了，结束翻页
+        if page_index < pages - 1:               # 还要继续翻时才歇一下
+            time.sleep(0.8)                      # 礼貌地歇一下再翻页，降低被拦风险
+        current_url = next_url
+
+    data = _merge_pages(page_list, url)          # 把多页结果合并成一个字典
+
+    # 如果用户传了关键词，就做关键词检索
     if keyword:
         total, results = search_keyword(data, keyword)
         data["关键词检索"] = {
@@ -560,4 +644,93 @@ def crawl(url, keyword=None):
             "结果": results,
         }
 
-    return data                                   # 6. 返回打包好的结果
+    return data
+
+
+def _fetch_page_html(url, use_browser):
+    """获取一页的 HTML：普通请求用 requests；动态渲染用浏览器（Selenium）。"""
+    if use_browser:
+        import renderer                        # 延迟导入，不用浏览器时不需要装 selenium
+        return renderer.render_html(url)
+    return fetch_html(url)
+
+
+def _parse_soup(html):
+    """把 HTML 解析成 BeautifulSoup 对象，并删掉脚本/样式等非正文内容。"""
+    try:
+        soup = BeautifulSoup(html, "lxml")     # 优先用 lxml（快）
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")  # 没装 lxml 就退回自带解析器
+    for tag in soup(["script", "style", "noscript", "iframe"]):
+        tag.decompose()                        # 删掉脚本、样式等无关内容
+    return soup
+
+
+def _extract_page(soup, url):
+    """分析单个网页，返回这一页的结果字典。"""
+    return {
+        "网址": url,
+        "标题": extract_title(soup),
+        "网页类型": detect_page_type(soup),
+        "描述": extract_meta_description(soup),
+        "表格": extract_tables(soup),
+        "列表": extract_list_items(soup),
+        "正文": extract_paragraphs(soup),
+        "图片": extract_images(soup, url),
+    }
+
+
+def _merge_pages(page_list, first_url):
+    """把多页的结果合并成一个字典（表格重编号，列表/正文/图片去重）。"""
+    if not page_list:                            # 一页都没抓到
+        return {
+            "网址": first_url,
+            "标题": "（未找到标题）",
+            "网页类型": "普通网页",
+            "描述": "",
+            "表格": [],
+            "列表": [],
+            "正文": [],
+            "图片": [],
+            "爬取页数": 0,
+        }
+
+    merged = {
+        "网址": first_url,
+        "标题": page_list[0]["标题"],
+        "网页类型": page_list[0]["网页类型"],
+        "描述": page_list[0]["描述"],
+        "表格": [],
+        "列表": [],
+        "正文": [],
+        "图片": [],
+        "爬取页数": len(page_list),
+    }
+
+    seen_list = set()
+    seen_paragraphs = set()
+    seen_images = set()
+    table_index = 0
+
+    for page in page_list:
+        for table in page["表格"]:               # 表格：重新编序号
+            table_index += 1
+            merged["表格"].append({
+                "序号": table_index,
+                "表头": table["表头"],
+                "行": table["行"],
+            })
+        for item in page["列表"]:                # 列表：去重
+            if item not in seen_list:
+                seen_list.add(item)
+                merged["列表"].append(item)
+        for paragraph in page["正文"]:           # 正文：去重
+            if paragraph not in seen_paragraphs:
+                seen_paragraphs.add(paragraph)
+                merged["正文"].append(paragraph)
+        for image in page["图片"]:               # 图片：去重
+            if image not in seen_images:
+                seen_images.add(image)
+                merged["图片"].append(image)
+
+    return merged

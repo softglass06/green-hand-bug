@@ -73,15 +73,17 @@ def append_text(text):
 
 # ---------- 第四部分：爬取逻辑（在后台线程里运行） ----------
 
-def do_crawl(url, keyword):
+def do_crawl(url, keyword, pages, use_browser):
     """真正执行爬取的函数（在后台线程里运行，避免界面卡死）。
 
     参数：
         url：要爬取的网址。
         keyword：要检索的关键词（可为空，为空表示不检索）。
+        pages：最多爬几页。
+        use_browser：是否用浏览器渲染动态内容。
     """
     try:
-        data = crawler.crawl(url, keyword or None)    # 调用爬虫抓取并分析网页（关键词为空就传 None）
+        data = crawler.crawl(url, keyword or None, pages, use_browser)  # 调用爬虫
         output_path = exporter.make_output_path(url)  # 计算 Excel 的保存路径
         exporter.export_to_excel(data, output_path)   # 把数据写成 Excel 文件
         # root.after(0, ...) 的作用：把"更新界面"这件事，从后台线程切回主线程执行。
@@ -96,6 +98,7 @@ def on_success(data, output_path):
     append_text("✅ 爬取完成！")                       # 显示完成
     append_text("网页标题：" + data["标题"])           # 显示标题
     append_text("网页类型：" + data["网页类型"])       # 显示网页类型
+    append_text("爬取页数：" + str(data.get("爬取页数", 1)) + " 页")
     append_text("找到表格：" + str(len(data["表格"])) + " 个")
     append_text("找到列表：" + str(len(data["列表"])) + " 条")
     append_text("找到正文段落：" + str(len(data["正文"])) + " 段")
@@ -145,6 +148,16 @@ def start_crawl():
 
     keyword = keyword_entry.get().strip()             # 取出关键词（可为空）
 
+    # 取出"爬取页数"，非法输入就按 1 处理
+    try:
+        pages = int(pages_spin.get())
+    except (ValueError, tk.TclError):
+        pages = 1
+    if pages < 1:
+        pages = 1
+
+    use_browser = bool(dynamic_var.get())             # 是否勾选了"动态渲染"
+
     crawl_button.config(state="disabled")             # 禁用按钮，防止重复点击
     open_button.config(state="disabled")              # 暂时禁用"打开文件夹"按钮
     status_label.config(text="⏳ 正在爬取…")          # 更新状态栏文字
@@ -155,11 +168,12 @@ def start_crawl():
     append_text("正在爬取：" + url)                    # 显示正在爬取的网址
     if keyword:                                       # 如果填了关键词
         append_text("检索关键词：" + keyword)          # 显示要检索的关键词
+    append_text("最多爬取：" + str(pages) + " 页" + ("（动态渲染）" if use_browser else ""))
     append_text("请稍候，可能需要几秒钟…")            # 提示等待
 
     # 开一个后台线程执行爬取，这样界面不会"卡死"。
     # daemon=True 表示：主程序退出时，这个线程也跟着一起结束。
-    threading.Thread(target=do_crawl, args=(url, keyword), daemon=True).start()
+    threading.Thread(target=do_crawl, args=(url, keyword, pages, use_browser), daemon=True).start()
 
 
 # ---------- 第六部分：打开结果文件夹 ----------
@@ -177,7 +191,7 @@ def open_output_folder():
 # 创建主窗口
 root = tk.Tk()
 root.title("小白爬虫工具")                            # 窗口标题
-root.geometry("640x620")                              # 窗口初始大小（宽 x 高）
+root.geometry("640x700")                              # 窗口初始大小（宽 x 高）
 root.configure(bg="#f5f6fa")                          # 窗口背景色
 
 # --- 顶部标题 ---
@@ -193,11 +207,11 @@ title_label.pack(pady=(16, 4))                        # 放到窗口里，上下
 # --- 使用说明（引导用户一步步操作） ---
 guide_text = (
     "使用说明（照着做就行）：\n"
-    "① 在网址输入框里，粘贴或输入要爬取的网址\n"
-    "② 可选：在关键词输入框里填一个词，程序会在网页里检索它\n"
-    "③ 点击「开始爬取」按钮\n"
-    "④ 等待几秒，程序会自动分析并生成 Excel 表格\n"
-    "⑤ 点击「打开结果文件夹」，查看生成的表格"
+    "① 输入网址（可省略 https://）\n"
+    "② 可选：填关键词、选爬取页数、勾选动态渲染\n"
+    "③ 点击「开始爬取」\n"
+    "④ 等待，程序自动分析并生成 Excel\n"
+    "⑤ 点「打开结果文件夹」查看表格"
 )
 guide_label = tk.Label(
     root,
@@ -261,6 +275,39 @@ keyword_hint = tk.Label(
     fg="#999999",
 )
 keyword_hint.pack(anchor="w", padx=24, pady=(2, 6))   # 靠左显示
+
+# --- 爬取页数 + 动态渲染行 ---
+options_frame = tk.Frame(root, bg="#f5f6fa")
+options_frame.pack(fill="x", padx=24, pady=4)
+
+pages_label = tk.Label(options_frame, text="爬取页数：", font=("微软雅黑", 12), bg="#f5f6fa")
+pages_label.pack(side="left")
+
+pages_spin = tk.Spinbox(options_frame, from_=1, to=100, width=6, font=("微软雅黑", 12))
+pages_spin.pack(side="left", padx=(6, 16))
+pages_spin.delete(0, "end")                            # 默认值设为 1
+pages_spin.insert(0, "1")
+
+dynamic_var = tk.IntVar(value=0)                       # 0=不勾选，1=勾选
+dynamic_check = tk.Checkbutton(
+    options_frame,
+    text="动态渲染（JS 网站）",
+    font=("微软雅黑", 11),
+    bg="#f5f6fa",
+    activebackground="#f5f6fa",
+    variable=dynamic_var,
+)
+dynamic_check.pack(side="left")
+
+# --- 页数/动态渲染小提示 ---
+options_hint = tk.Label(
+    root,
+    text="页数=1 只爬当前页；填 N 会顺着「下一页」继续爬。动态渲染用于正文靠 JS 加载的网站（需先 pip install selenium）",
+    font=("微软雅黑", 9),
+    bg="#f5f6fa",
+    fg="#999999",
+)
+options_hint.pack(anchor="w", padx=24, pady=(2, 6))    # 靠左显示
 
 # --- 开始按钮 ---
 crawl_button = tk.Button(

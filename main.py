@@ -56,6 +56,7 @@ def print_summary(data):
     print("=" * 50)
     print(f"  网页标题：{data['标题']}")
     print(f"  网页类型：{data['网页类型']}")
+    print(f"  爬取页数：{data.get('爬取页数', 1)} 页")
     print(f"  找到表格：{len(data['表格'])} 个")
     print(f"  找到列表：{len(data['列表'])} 条")
     print(f"  找到正文段落：{len(data['正文'])} 段")
@@ -84,12 +85,25 @@ def main():
 
         url = normalize_url(raw_url)         # 整理用户输入的网址
         keyword = input("请输入要检索的关键词（直接回车跳过检索）：").strip() or None
+
+        # 输入爬取页数（直接回车=1 页）
+        pages_raw = input("请输入最多爬取页数（直接回车=1 页）：").strip()
+        try:
+            pages = int(pages_raw) if pages_raw else 1
+        except ValueError:
+            pages = 1
+        pages = max(1, pages)
+
+        # 是否用浏览器动态渲染（默认否）
+        use_browser = input("是否用浏览器动态渲染？(y/N)：").strip().lower() == "y"
+
         print(f"\n正在爬取：{url} ...")       # 提示用户正在爬取
         if keyword:                          # 如果填了关键词
             print(f"检索关键词：{keyword}")
+        print(f"最多爬取：{pages} 页" + ("（动态渲染）" if use_browser else ""))
 
         try:
-            data = crawler.crawl(url, keyword)  # 调用爬虫，抓取并分析网页（可带关键词）
+            data = crawler.crawl(url, keyword, pages, use_browser)  # 调用爬虫
         except Exception as e:               # 如果爬取过程中出错（如网址打错、断网）
             print(f"❌ 爬取失败：{e}")        # 打印错误信息
             print("提示：请检查网址是否正确、网络是否畅通。")

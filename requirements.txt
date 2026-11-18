@@ -6,3 +6,7 @@ requests          # 用来向网站发送请求、拿回网页内容
 beautifulsoup4    # 用来解析网页、从网页里查找内容
 lxml              # BeautifulSoup 的解析引擎，速度更快
 openpyxl          # 用来读写 Excel 文件（.xlsx）
+
+# 下面是「可选」依赖：只有勾选界面里的「动态渲染」时才需要。
+# 它会驱动 Windows 自带的 Edge 浏览器，把 JS 动态加载的网页渲染出来。
+selenium          # 可选：动态渲染 JS 网站用（会用到 Edge，无需另装驱动）
