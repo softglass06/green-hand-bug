@@ -73,14 +73,15 @@ def append_text(text):
 
 # ---------- 第四部分：爬取逻辑（在后台线程里运行） ----------
 
-def do_crawl(url):
+def do_crawl(url, keyword):
     """真正执行爬取的函数（在后台线程里运行，避免界面卡死）。
 
     参数：
         url：要爬取的网址。
+        keyword：要检索的关键词（可为空，为空表示不检索）。
     """
     try:
-        data = crawler.crawl(url)                     # 调用爬虫抓取并分析网页
+        data = crawler.crawl(url, keyword or None)    # 调用爬虫抓取并分析网页（关键词为空就传 None）
         output_path = exporter.make_output_path(url)  # 计算 Excel 的保存路径
         exporter.export_to_excel(data, output_path)   # 把数据写成 Excel 文件
         # root.after(0, ...) 的作用：把"更新界面"这件事，从后台线程切回主线程执行。
@@ -99,6 +100,22 @@ def on_success(data, output_path):
     append_text("找到列表：" + str(len(data["列表"])) + " 条")
     append_text("找到正文段落：" + str(len(data["正文"])) + " 段")
     append_text("找到图片：" + str(len(data["图片"])) + " 张")
+
+    # 如果做了关键词检索，把检索结果也显示出来
+    search = data.get("关键词检索")
+    if search:
+        append_text("")
+        keyword = search["关键词"]
+        total = search["总次数"]
+        if total > 0:
+            append_text("🔍 关键词「" + keyword + "」共出现 " + str(total) + " 次：")
+            for item in search["结果"][:20]:          # 窗口里最多显示前 20 条，避免刷屏
+                append_text("   · [" + item["区域"] + "] " + item["片段"])
+            if len(search["结果"]) > 20:
+                append_text("   … 其余 " + str(len(search["结果"]) - 20) + " 处请在 Excel 的「关键词检索」工作表查看")
+        else:
+            append_text("🔍 未找到关键词「" + keyword + "」")
+
     append_text("📊 已生成 Excel：" + output_path)     # 显示保存路径
     append_text("")                                   # 空一行
     append_text("点下面的「打开结果文件夹」即可查看生成的表格。")
@@ -126,6 +143,8 @@ def start_crawl():
         messagebox.showwarning("提示", "请先输入网址！")  # 弹窗提醒
         return                                        # 直接返回，不往下执行
 
+    keyword = keyword_entry.get().strip()             # 取出关键词（可为空）
+
     crawl_button.config(state="disabled")             # 禁用按钮，防止重复点击
     open_button.config(state="disabled")              # 暂时禁用"打开文件夹"按钮
     status_label.config(text="⏳ 正在爬取…")          # 更新状态栏文字
@@ -134,11 +153,13 @@ def start_crawl():
     text_box.delete("1.0", "end")                     # 清空上次的结果
     text_box.config(state="disabled")                 # 重新设为只读
     append_text("正在爬取：" + url)                    # 显示正在爬取的网址
+    if keyword:                                       # 如果填了关键词
+        append_text("检索关键词：" + keyword)          # 显示要检索的关键词
     append_text("请稍候，可能需要几秒钟…")            # 提示等待
 
     # 开一个后台线程执行爬取，这样界面不会"卡死"。
     # daemon=True 表示：主程序退出时，这个线程也跟着一起结束。
-    threading.Thread(target=do_crawl, args=(url,), daemon=True).start()
+    threading.Thread(target=do_crawl, args=(url, keyword), daemon=True).start()
 
 
 # ---------- 第六部分：打开结果文件夹 ----------
@@ -156,7 +177,7 @@ def open_output_folder():
 # 创建主窗口
 root = tk.Tk()
 root.title("小白爬虫工具")                            # 窗口标题
-root.geometry("640x560")                              # 窗口初始大小（宽 x 高）
+root.geometry("640x620")                              # 窗口初始大小（宽 x 高）
 root.configure(bg="#f5f6fa")                          # 窗口背景色
 
 # --- 顶部标题 ---
@@ -172,10 +193,11 @@ title_label.pack(pady=(16, 4))                        # 放到窗口里，上下
 # --- 使用说明（引导用户一步步操作） ---
 guide_text = (
     "使用说明（照着做就行）：\n"
-    "① 在下面的输入框里，粘贴或输入要爬取的网址\n"
-    "② 点击「开始爬取」按钮\n"
-    "③ 等待几秒，程序会自动分析并生成 Excel 表格\n"
-    "④ 点击「打开结果文件夹」，查看生成的表格"
+    "① 在网址输入框里，粘贴或输入要爬取的网址\n"
+    "② 可选：在关键词输入框里填一个词，程序会在网页里检索它\n"
+    "③ 点击「开始爬取」按钮\n"
+    "④ 等待几秒，程序会自动分析并生成 Excel 表格\n"
+    "⑤ 点击「打开结果文件夹」，查看生成的表格"
 )
 guide_label = tk.Label(
     root,
@@ -213,6 +235,32 @@ hint_label = tk.Label(
     fg="#999999",
 )
 hint_label.pack(anchor="w", padx=24, pady=(2, 6))     # 靠左显示
+
+# --- 关键词输入行（可选） ---
+keyword_frame = tk.Frame(root, bg="#f5f6fa")          # 用一个"容器"放关键词标签和输入框
+keyword_frame.pack(fill="x", padx=24, pady=4)
+
+keyword_label = tk.Label(
+    keyword_frame,
+    text="关键词：",
+    font=("微软雅黑", 12),
+    bg="#f5f6fa",
+)
+keyword_label.pack(side="left")                       # 标签靠左
+
+keyword_entry = tk.Entry(keyword_frame, font=("微软雅黑", 12))  # 关键词输入框
+keyword_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+keyword_entry.bind("<Return>", lambda event: start_crawl())  # 按回车也能触发爬取
+
+# --- 关键词小提示 ---
+keyword_hint = tk.Label(
+    root,
+    text="可选：填了关键词，就会在网页里检索它出现在哪些地方；留空则只爬取不检索",
+    font=("微软雅黑", 9),
+    bg="#f5f6fa",
+    fg="#999999",
+)
+keyword_hint.pack(anchor="w", padx=24, pady=(2, 6))   # 靠左显示
 
 # --- 开始按钮 ---
 crawl_button = tk.Button(

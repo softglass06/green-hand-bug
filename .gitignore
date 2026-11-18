@@ -1,0 +1,9 @@
+# Python 缓存 / 编译产物（不需要提交）
+__pycache__/
+*.pyc
+
+# 程序运行生成的 Excel 结果（不需要提交）
+output/
+
+# Excel 临时锁定文件
+~$*

@@ -83,16 +83,33 @@ def main():
             break                            # 跳出循环，结束程序
 
         url = normalize_url(raw_url)         # 整理用户输入的网址
+        keyword = input("请输入要检索的关键词（直接回车跳过检索）：").strip() or None
         print(f"\n正在爬取：{url} ...")       # 提示用户正在爬取
+        if keyword:                          # 如果填了关键词
+            print(f"检索关键词：{keyword}")
 
         try:
-            data = crawler.crawl(url)        # 调用爬虫，抓取并分析网页
+            data = crawler.crawl(url, keyword)  # 调用爬虫，抓取并分析网页（可带关键词）
         except Exception as e:               # 如果爬取过程中出错（如网址打错、断网）
             print(f"❌ 爬取失败：{e}")        # 打印错误信息
             print("提示：请检查网址是否正确、网络是否畅通。")
             continue                         # 跳过本次，回到循环开头让用户重新输入
 
         print_summary(data)                  # 打印分析结果
+
+        # 如果做了关键词检索，把结果打印出来
+        if keyword:
+            search = data.get("关键词检索", {})
+            total = search.get("总次数", 0)
+            results = search.get("结果", [])
+            if total > 0:
+                print(f"\n🔍 关键词「{keyword}」共出现 {total} 次：")
+                for item in results[:20]:
+                    print(f"   · [{item['区域']}] {item['片段']}")
+                if len(results) > 20:
+                    print(f"   … 其余 {len(results) - 20} 处请在 Excel 的「关键词检索」工作表查看")
+            else:
+                print(f"\n🔍 未找到关键词「{keyword}」")
 
         # 生成 Excel 文件的保存路径。
         output_path = exporter.make_output_path(url)

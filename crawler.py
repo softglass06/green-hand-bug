@@ -57,7 +57,7 @@ def fetch_html(url, timeout=15):
         timeout：最长等待多少秒，超过就报错（默认 15 秒）。
 
     返回：
-        网页的 HTML 文字（字符串）。
+        网页的 HTML 文字（字符串，已处理好中文乱码）。
     """
     # 伪装成"浏览器"的身份去访问。
     # 有些网站会拒绝"爬虫程序"的访问，带上浏览器标识（User-Agent）能降低被拒绝的概率。
@@ -75,14 +75,62 @@ def fetch_html(url, timeout=15):
     # 如果网站返回了错误状态码（例如 404 找不到页面），这里会直接抛出异常。
     response.raise_for_status()
 
-    # 处理中文乱码问题：
-    # 如果网站没告诉我们编码，或者给的编码是 iso-8859-1（这种编码常导致中文乱码），
-    # 就让 requests 自己"猜"一个更准确的编码。
-    if response.encoding is None or response.encoding.lower() == "iso-8859-1":
-        response.encoding = response.apparent_encoding
+    # 把网页的原始字节，按正确的编码转成文字（解决中文乱码问题）。
+    return _decode_html(response)
 
-    # 返回网页的纯文字内容（HTML 代码）。
-    return response.text
+
+def _decode_html(response):
+    """把网页的原始字节，按正确的编码转成文字（解决中文乱码）。
+
+    思路：拿几个"可能是正确编码"的候选，按可信度逐个尝试，
+    谁能正常解码（不报错）就用谁。候选顺序：
+    1. requests 根据字节内容"猜"出来的编码（最靠谱）
+    2. 网页自己在 <meta charset> 里声明的编码
+    3. 服务器在 HTTP 头里声明的编码
+    4. 最后兜底用 utf-8
+
+    参数：
+        response：requests 拿到的响应对象。
+
+    返回：
+        解码好的网页文字（字符串）。
+    """
+    raw = response.content                      # 网页的原始字节（未解码）
+
+    # 逐个收集候选编码，去重并保持顺序
+    candidates = []
+    for enc in (response.apparent_encoding, _detect_meta_charset(raw), response.encoding, "utf-8"):
+        if enc:                                  # 如果这个候选不是空
+            enc = enc.strip().lower()            # 去掉空格、统一小写
+            if enc not in candidates:            # 去重
+                candidates.append(enc)
+
+    # 依次尝试：谁能正常解码（不报错），就用谁
+    for enc in candidates:
+        try:
+            return raw.decode(enc)
+        except (LookupError, UnicodeDecodeError):
+            continue                             # 这个编码不对，试下一个
+
+    # 全部失败时，用 utf-8 强解（遇到坏字节用 � 代替，保证不崩溃）
+    return raw.decode("utf-8", errors="replace")
+
+
+def _detect_meta_charset(raw):
+    """从网页前 8KB 字节里，找出 <meta charset="xxx"> 声明的编码。
+
+    参数：
+        raw：网页的原始字节。
+
+    返回：
+        声明的编码字符串（如 "utf-8"、"gbk"），找不到返回 None。
+    """
+    head = raw[:8192].lower()                    # 只看前 8KB，charset 一般都在最前面
+    match = re.search(rb'charset\s*=\s*["\']?\s*([a-z0-9_\-]+)', head)
+    if match:
+        enc = match.group(1).decode("ascii", errors="ignore")
+        return enc or None
+    return None
 
 
 # ---------- 第四部分：自动识别网页类型 ----------
@@ -300,7 +348,10 @@ def extract_list_items(soup):
 # ---------- 第八部分：提取正文和图片 ----------
 
 def extract_paragraphs(soup, limit=300):
-    """提取网页正文里的段落文字（来自 <p> 标签）。
+    """提取网页正文的段落文字。
+
+    优先抓 <p> 标签；如果 <p> 太少（很多现代网站的正文直接写在
+    <div>/<section>/<article> 里），就再用"叶子块"的方式兜底，尽量把正文抓全。
 
     参数：
         soup：已经解析好的网页对象。
@@ -310,13 +361,33 @@ def extract_paragraphs(soup, limit=300):
         一个列表，装的是每一段文字。
     """
     paragraphs = []                          # 准备装段落
+    seen = set()                             # 用来去重（比列表查找更快）
 
-    for p in soup.find_all("p"):             # 遍历所有 <p> 段落标签
+    def add(text):
+        """去重后加入结果。"""
+        if text and text not in seen:
+            seen.add(text)
+            paragraphs.append(text)
+
+    # 第一步：抓所有 <p> 段落标签
+    for p in soup.find_all("p"):
         text = clean_text(p.get_text())      # 取出文字并清洗
-        if text and text not in paragraphs:  # 去空、去重
-            paragraphs.append(text)          # 加入结果
-            if len(paragraphs) >= limit:     # 达到上限就停止
-                break
+        add(text)
+        if len(paragraphs) >= limit:         # 达到上限就停止
+            return paragraphs
+
+    # 第二步：<p> 太少时，用"叶子块级标签"兜底抓正文。
+    if len(paragraphs) < 5:
+        for tag in soup.find_all(["article", "main", "section", "div", "blockquote"]):
+            # 如果这个块里面还套着别的块级标签，就跳过它——
+            # 因为它的文字会由里面的小块分别抓到，整块抓会重复一大坨。
+            if tag.find(["article", "main", "section", "div", "blockquote", "p", "li", "table"]):
+                continue
+            text = clean_text(tag.get_text())
+            if len(text) >= 2:               # 过滤掉太短的碎片（如单个按钮文字）
+                add(text)
+                if len(paragraphs) >= limit:
+                    break
     return paragraphs                        # 返回所有段落
 
 
@@ -348,13 +419,109 @@ def extract_images(soup, base_url, limit=300):
     return images                            # 返回图片链接
 
 
+# ---------- 第八点五部分：关键词检索 ----------
+
+def search_keyword(data, keyword):
+    """在已经提取好的网页数据里，检索某个关键词出现的所有位置。
+
+    检索范围：标题、描述、正文段落、列表条目、表格单元格（即"全部内容"）。
+
+    参数：
+        data：crawler.crawl 返回的结果字典。
+        keyword：要检索的关键词。
+
+    返回：
+        一个元组 (总次数, 结果列表)。
+        结果列表里每项是一个字典：{"区域": 区域名, "片段": 命中片段的文字}。
+    """
+    low_keyword = keyword.lower()                # 统一转小写，实现"不区分大小写"匹配
+
+    # 把所有要搜索的"区域"收集到一个列表里，每项是 (区域名, 文字)。
+    areas = [("标题", data.get("标题", ""))]
+    if data.get("描述"):
+        areas.append(("描述", data["描述"]))
+    for paragraph in data.get("正文", []):
+        areas.append(("正文段落", paragraph))
+    for item in data.get("列表", []):
+        areas.append(("列表条目", item))
+    for table in data.get("表格", []):
+        for row in table.get("行", []):
+            for cell in row:
+                areas.append(("表格单元格", cell))
+
+    total = 0                                    # 关键词一共出现了多少次
+    results = []                                 # 装每个命中片段
+
+    for area, text in areas:
+        if not text:
+            continue
+        count = text.lower().count(low_keyword)  # 这段文字里出现了几次
+        if count <= 0:
+            continue
+        total += count
+        # 把这段文字里每个命中位置截成"带前后文的片段"，加入结果
+        for snippet in _find_contexts(text, keyword):
+            results.append({"区域": area, "片段": snippet})
+
+    return total, results
+
+
+def _find_contexts(text, keyword, window=30):
+    """在 text 里找出 keyword 的每一个位置，截取前后 window 个字符作为上下文片段。
+
+    关键词会用【】包起来，方便一眼看到命中的地方。
+
+    参数：
+        text：要搜索的原始文字。
+        keyword：关键词。
+        window：片段里关键词前后各保留多少个字符（默认 30）。
+
+    返回：
+        一个列表，装的是每个命中位置的片段文字。
+    """
+    low_text = text.lower()                      # 转小写，配合不区分大小写
+    low_keyword = keyword.lower()
+    snippets = []                                # 准备装片段
+    pos = 0                                      # 从文字开头开始找
+
+    while True:
+        idx = low_text.find(low_keyword, pos)    # 找下一个关键词出现的位置
+        if idx == -1:                            # 找不到更多了
+            break
+
+        # 计算片段在原文里的起止位置（前后各留 window 个字符）
+        left = max(0, idx - window)
+        right = min(len(text), idx + len(keyword) + window)
+
+        # 取出片段，并算出关键词在片段里的起点位置
+        snippet = text[left:right]
+        kw_start = idx - left
+
+        # 用【】把关键词包起来，起到"高亮"效果
+        highlighted = (
+            snippet[:kw_start]
+            + "【" + snippet[kw_start:kw_start + len(keyword)] + "】"
+            + snippet[kw_start + len(keyword):]
+        )
+
+        # 片段两端如果被截断，加个省略号提示
+        prefix = "…" if left > 0 else ""
+        suffix = "…" if right < len(text) else ""
+
+        snippets.append(prefix + highlighted + suffix)
+        pos = idx + len(keyword)                 # 从这个关键词之后继续找
+
+    return snippets
+
+
 # ---------- 第九部分：总入口 ----------
 
-def crawl(url):
+def crawl(url, keyword=None):
     """总入口：抓取并分析一个网页，把结果打包成一个字典返回。
 
     参数：
         url：要爬取的网址。
+        keyword：可选，要检索的关键词。传了它，结果里会多一个"关键词检索"字段。
 
     返回：
         一个字典，包含标题、网页类型、描述、表格、列表、正文、图片等所有结果。
@@ -368,7 +535,11 @@ def crawl(url):
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
 
-    # 3. 调用上面各个函数，把分析结果打包成一个字典。
+    # 3. 把脚本、样式等"非正文"的内容删掉，避免它们混进正文/检索结果里。
+    for tag in soup(["script", "style", "noscript", "iframe"]):
+        tag.decompose()
+
+    # 4. 调用上面各个函数，把分析结果打包成一个字典。
     data = {
         "网址": url,                              # 记录网址
         "标题": extract_title(soup),              # 提取标题
@@ -379,4 +550,14 @@ def crawl(url):
         "正文": extract_paragraphs(soup),         # 提取正文段落
         "图片": extract_images(soup, url),        # 提取图片链接
     }
-    return data                                   # 4. 返回打包好的结果
+
+    # 5. 如果用户传了关键词，就做关键词检索，并把结果塞进 data 里。
+    if keyword:
+        total, results = search_keyword(data, keyword)
+        data["关键词检索"] = {
+            "关键词": keyword,
+            "总次数": total,
+            "结果": results,
+        }
+
+    return data                                   # 6. 返回打包好的结果

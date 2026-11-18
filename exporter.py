@@ -194,5 +194,24 @@ def export_to_excel(data, output_path):
         _style_header(img_ws, row=1, col_count=1)  # 表头加粗上色
         _auto_width(img_ws)                      # 自动调整列宽
 
+    # ---- 工作表：关键词检索 ----
+    search = data.get("关键词检索")              # 取出关键词检索结果
+    if search:                                   # 只有做了关键词检索才创建
+        kw_ws = wb.create_sheet("关键词检索")    # 新建工作表
+        # 顶部两行放"关键词"和"总次数"
+        kw_ws.cell(row=1, column=1, value="关键词")
+        kw_ws.cell(row=1, column=2, value=search.get("关键词", ""))
+        kw_ws.cell(row=2, column=1, value="总出现次数")
+        kw_ws.cell(row=2, column=2, value=search.get("总次数", 0))
+        # 第 3 行开始是"所在区域 / 命中片段"两列
+        kw_ws.cell(row=3, column=1, value="所在区域")
+        kw_ws.cell(row=3, column=2, value="命中片段")
+        results = search.get("结果", [])         # 取出所有命中片段
+        for i, item in enumerate(results, start=4):  # 从第 4 行开始写
+            kw_ws.cell(row=i, column=1, value=item.get("区域", ""))
+            kw_ws.cell(row=i, column=2, value=item.get("片段", ""))
+        _style_header(kw_ws, row=3, col_count=2)  # 第 3 行表头加粗上色
+        _auto_width(kw_ws)                       # 自动调整列宽
+
     wb.save(output_path)                         # 把工作簿保存到指定路径
     return output_path                           # 返回保存路径
